@@ -1,0 +1,29 @@
+services:
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  demo:
+    build:
+      context: .
+      args:
+        VERSION: compose
+    environment:
+      HTTP_ADDRESS: ":8080"
+      REDIS_ADDR: "redis:6379"
+      RATE_LIMIT: "5"
+      RATE_WINDOW: "10s"
+    ports:
+      - "8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
