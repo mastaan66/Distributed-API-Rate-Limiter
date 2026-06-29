@@ -22,8 +22,11 @@ It provides a small core API plus safe middleware for Gin and standard
 - Safe direct-peer IP identity by default
 - Explicit trusted-proxy support
 - Gin and `net/http` adapters
+- Dynamic per-request policies for routes, tenants, and subscription plans
+- Report-only mode for safely trialing new limits
 - Fail-open or fail-closed behavior
 - Limit, remaining, reset, and retry response headers
+- Policy and decision metadata available to downstream handlers
 - Context cancellation, integration tests, and concurrency tests
 
 ## Five-minute demo
@@ -132,6 +135,75 @@ guard, err := ginlimit.New(limiter, ginlimit.Options{
 Do not put secrets directly into custom keys. The Redis limiter hashes
 identities by default, but application logs and observers may still expose the
 original value if you record it.
+
+## Dynamic policies
+
+Use `PolicyFor` when the quota depends on request data. The returned policy is
+validated for every request before Redis is called:
+
+```go
+guard, err := ginlimit.New(limiter, ginlimit.Options{
+    PolicyFor: func(context *gin.Context) (ratelimit.Policy, error) {
+        switch context.GetHeader("X-Plan") {
+        case "enterprise":
+            return ratelimit.Policy{Limit: 10_000, Window: time.Hour}, nil
+        case "pro":
+            return ratelimit.Policy{Limit: 1_000, Window: time.Hour}, nil
+        default:
+            return ratelimit.Policy{Limit: 100, Window: time.Hour}, nil
+        }
+    },
+})
+```
+
+`PolicyFor` takes precedence over the static `Policy` field. Resolver errors
+and invalid returned policies follow the configured fail-open or fail-closed
+behavior.
+
+Requests with different quota scopes should also have different keys. For
+example, include the route in `Key` when each route has an independent quota;
+omit it when all routes intentionally share one quota.
+
+## Report-only rollout
+
+Trial a policy without rejecting traffic:
+
+```go
+guard, err := ginlimit.New(limiter, ginlimit.Options{
+    Policy:      ratelimit.Policy{Limit: 100, Window: time.Minute},
+    Enforcement: middleware.ReportOnly,
+    Observe: func(decision ratelimit.Decision, err error) {
+        if err == nil && !decision.Allowed {
+            metrics.WouldRateLimit.Inc()
+        }
+    },
+})
+```
+
+A would-be denial continues to the next handler and includes
+`RateLimit-Report-Only: true`. It does not include `Retry-After`, because the
+HTTP request was admitted. The zero value, `middleware.Enforce`, preserves the
+default behavior of returning HTTP 429.
+
+## Downstream decision metadata
+
+After a successful limiter check, both adapters attach the selected policy and
+decision to the request context:
+
+```go
+result, ok := middleware.ResultFromContext(request.Context())
+if ok {
+    log.Printf(
+        "allowed=%t remaining=%d limit=%d",
+        result.Decision.Allowed,
+        result.Decision.Remaining,
+        result.Policy.Limit,
+    )
+}
+```
+
+Gin handlers can use `context.Request.Context()` in the same way. Skipped
+requests and fail-open limiter errors do not contain a result.
 
 ## Trusted reverse proxies
 

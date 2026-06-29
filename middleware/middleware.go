@@ -3,6 +3,7 @@
 package middleware
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"net"
@@ -23,6 +24,40 @@ const (
 	// FailOpen allows requests when the limiter or identity resolver fails.
 	FailOpen
 )
+
+// EnforcementMode controls whether a denied decision blocks the request.
+type EnforcementMode uint8
+
+const (
+	// Enforce rejects requests when the limiter denies them.
+	Enforce EnforcementMode = iota
+	// ReportOnly records and exposes denied decisions but lets requests proceed.
+	// It is useful when evaluating a new policy before enforcing it.
+	ReportOnly
+)
+
+// Result contains the policy and decision evaluated for an HTTP request.
+type Result struct {
+	Policy   ratelimit.Policy
+	Decision ratelimit.Decision
+}
+
+type resultContextKey struct{}
+
+// ContextWithResult returns a child context containing a rate-limit result.
+// HTTP adapters use this to make decisions available to downstream handlers.
+func ContextWithResult(ctx context.Context, result Result) context.Context {
+	return context.WithValue(ctx, resultContextKey{}, result)
+}
+
+// ResultFromContext returns the rate-limit result attached by HTTP middleware.
+func ResultFromContext(ctx context.Context) (Result, bool) {
+	if ctx == nil {
+		return Result{}, false
+	}
+	result, ok := ctx.Value(resultContextKey{}).(Result)
+	return result, ok
+}
 
 // KeyFunc derives a rate-limit identity from an HTTP request.
 type KeyFunc func(*http.Request) (string, error)
@@ -95,6 +130,14 @@ func ApplyHeaders(header http.Header, decision ratelimit.Decision) {
 	if !decision.Allowed {
 		header.Set("Retry-After", strconv.FormatInt(durationSeconds(decision.RetryAfter), 10))
 	}
+}
+
+// ApplyReportOnlyHeaders writes rate-limit fields without Retry-After because
+// a report-only denial does not reject the HTTP request.
+func ApplyReportOnlyHeaders(header http.Header, decision ratelimit.Decision) {
+	ApplyHeaders(header, decision)
+	header.Del("Retry-After")
+	header.Set("RateLimit-Report-Only", "true")
 }
 
 func parseRemoteIP(remoteAddress string) (string, error) {

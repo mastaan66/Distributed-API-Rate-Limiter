@@ -13,6 +13,9 @@ Versioning and the Keep a Changelog structure.
 - Safe direct-peer and trusted-proxy identity resolvers
 - Fail-open and fail-closed policies
 - Rate-limit response headers
+- Dynamic per-request policy resolvers for Gin and standard `net/http`
+- Report-only enforcement mode for safely evaluating new policies
+- Downstream request-context access to selected policies and decisions
 - Real-Redis concurrency and integration tests
 - Production-shaped demo server and Docker Compose quickstart
 - CI, security, and release automation

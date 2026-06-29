@@ -13,11 +13,16 @@ import (
 // KeyFunc derives a rate-limit identity from a Gin request.
 type KeyFunc func(*ginframework.Context) (string, error)
 
+// PolicyFunc selects a rate-limit policy for a Gin request.
+type PolicyFunc func(*ginframework.Context) (ratelimit.Policy, error)
+
 // Options configures Gin rate-limit middleware.
 type Options struct {
 	Policy       ratelimit.Policy
+	PolicyFor    PolicyFunc
 	Key          KeyFunc
 	FailureMode  common.FailureMode
+	Enforcement  common.EnforcementMode
 	Skip         func(*ginframework.Context) bool
 	Observe      func(ratelimit.Decision, error)
 	Denied       func(*ginframework.Context, ratelimit.Decision)
@@ -29,11 +34,16 @@ func New(limiter ratelimit.Limiter, options Options) (ginframework.HandlerFunc, 
 	if limiter == nil {
 		return nil, fmt.Errorf("limiter must not be nil")
 	}
-	if err := options.Policy.Validate(); err != nil {
-		return nil, err
+	if options.PolicyFor == nil {
+		if err := options.Policy.Validate(); err != nil {
+			return nil, err
+		}
 	}
 	if options.FailureMode != common.FailClosed && options.FailureMode != common.FailOpen {
 		return nil, fmt.Errorf("unsupported failure mode %d", options.FailureMode)
+	}
+	if options.Enforcement != common.Enforce && options.Enforcement != common.ReportOnly {
+		return nil, fmt.Errorf("unsupported enforcement mode %d", options.Enforcement)
 	}
 	if options.Key == nil {
 		options.Key = func(context *ginframework.Context) (string, error) {
@@ -53,6 +63,24 @@ func New(limiter ratelimit.Limiter, options Options) (ginframework.HandlerFunc, 
 			return
 		}
 
+		policy := options.Policy
+		if options.PolicyFor != nil {
+			var err error
+			policy, err = options.PolicyFor(context)
+			if err == nil {
+				err = policy.Validate()
+			}
+			if err != nil {
+				observe(options.Observe, ratelimit.Decision{}, err)
+				if options.FailureMode == common.FailOpen {
+					context.Next()
+					return
+				}
+				options.LimiterError(context, err)
+				return
+			}
+		}
+
 		key, err := options.Key(context)
 		if err != nil {
 			observe(options.Observe, ratelimit.Decision{}, err)
@@ -64,7 +92,7 @@ func New(limiter ratelimit.Limiter, options Options) (ginframework.HandlerFunc, 
 			return
 		}
 
-		decision, err := limiter.Allow(context.Request.Context(), key, options.Policy)
+		decision, err := limiter.Allow(context.Request.Context(), key, policy)
 		observe(options.Observe, decision, err)
 		if err != nil {
 			if options.FailureMode == common.FailOpen {
@@ -75,8 +103,16 @@ func New(limiter ratelimit.Limiter, options Options) (ginframework.HandlerFunc, 
 			return
 		}
 
-		common.ApplyHeaders(context.Writer.Header(), decision)
-		if !decision.Allowed {
+		context.Request = context.Request.WithContext(common.ContextWithResult(
+			context.Request.Context(),
+			common.Result{Policy: policy, Decision: decision},
+		))
+		if options.Enforcement == common.ReportOnly {
+			common.ApplyReportOnlyHeaders(context.Writer.Header(), decision)
+		} else {
+			common.ApplyHeaders(context.Writer.Header(), decision)
+		}
+		if !decision.Allowed && options.Enforcement == common.Enforce {
 			options.Denied(context, decision)
 			return
 		}

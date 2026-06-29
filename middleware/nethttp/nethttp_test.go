@@ -16,10 +16,12 @@ type stubLimiter struct {
 	decision ratelimit.Decision
 	err      error
 	key      string
+	policy   ratelimit.Policy
 }
 
-func (stub *stubLimiter) Allow(_ context.Context, key string, _ ratelimit.Policy) (ratelimit.Decision, error) {
+func (stub *stubLimiter) Allow(_ context.Context, key string, policy ratelimit.Policy) (ratelimit.Decision, error) {
 	stub.key = key
+	stub.policy = policy
 	return stub.decision, stub.err
 }
 
@@ -83,6 +85,92 @@ func TestMiddlewareDenies(t *testing.T) {
 	}
 	if got := recorder.Header().Get("Retry-After"); got != "1" {
 		t.Fatalf("Retry-After = %q, want 1", got)
+	}
+}
+
+func TestMiddlewareDynamicPolicyReportOnlyAndContext(t *testing.T) {
+	t.Parallel()
+
+	selected := ratelimit.Policy{Limit: 25, Window: time.Minute}
+	limiter := &stubLimiter{decision: ratelimit.Decision{
+		Allowed:    false,
+		Limit:      selected.Limit,
+		Remaining:  0,
+		ResetAfter: 10 * time.Second,
+		RetryAfter: 10 * time.Second,
+	}}
+	rateLimit, err := New(limiter, Options{
+		PolicyFor: func(request *http.Request) (ratelimit.Policy, error) {
+			if request.Header.Get("X-Plan") != "pro" {
+				t.Fatalf("PolicyFor() did not receive request headers")
+			}
+			return selected, nil
+		},
+		Enforcement: common.ReportOnly,
+	})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	reached := false
+	handler := rateLimit(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		reached = true
+		result, ok := common.ResultFromContext(request.Context())
+		if !ok {
+			t.Fatal("rate-limit result missing from request context")
+		}
+		if result.Policy != selected {
+			t.Fatalf("context policy = %+v, want %+v", result.Policy, selected)
+		}
+		if result.Decision.Allowed {
+			t.Fatal("context decision = allowed, want report-only denial")
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	request := httptest.NewRequest(http.MethodGet, "/reports", nil)
+	request.Header.Set("X-Plan", "pro")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if !reached {
+		t.Fatal("report-only denial did not reach next handler")
+	}
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNoContent)
+	}
+	if limiter.policy != selected {
+		t.Fatalf("limiter policy = %+v, want %+v", limiter.policy, selected)
+	}
+	if got := recorder.Header().Get("RateLimit-Report-Only"); got != "true" {
+		t.Fatalf("RateLimit-Report-Only = %q, want true", got)
+	}
+	if got := recorder.Header().Get("Retry-After"); got != "" {
+		t.Fatalf("Retry-After = %q, want empty for admitted request", got)
+	}
+}
+
+func TestMiddlewareRejectsInvalidDynamicPolicy(t *testing.T) {
+	t.Parallel()
+
+	limiter := &stubLimiter{}
+	rateLimit, err := New(limiter, Options{
+		PolicyFor: func(*http.Request) (ratelimit.Policy, error) {
+			return ratelimit.Policy{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	rateLimit(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("invalid policy reached next handler")
+	})).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+	if limiter.key != "" {
+		t.Fatalf("limiter was called with key %q", limiter.key)
 	}
 }
 

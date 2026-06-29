@@ -8,8 +8,8 @@ HTTP request
     v
 Gin or net/http middleware
     |
+    +-- resolve request policy
     +-- resolve identity
-    +-- apply route policy
     |
     v
 ratelimit.RedisLimiter
@@ -23,6 +23,12 @@ atomic Redis Lua script
     +-- conditionally add the request
     +-- set expiry
     +-- return decision metadata
+    |
+    v
+Gin or net/http middleware
+    |
+    +-- attach decision metadata
+    +-- enforce or report only
 ```
 
 The core package has no dependency on Gin. Framework adapters translate HTTP
@@ -75,11 +81,17 @@ bucket.
 
 ## Failure behavior
 
-The core returns Redis and context errors. Framework adapters decide whether to
-fail closed with HTTP 503 or fail open and call the next handler.
+The core returns Redis and context errors. Dynamic policy resolution and
+validation can also fail before Redis is called. Framework adapters decide
+whether to fail closed with HTTP 503 or fail open and call the next handler.
 
 Fail closed is the default because silently bypassing limits is unsafe for many
 protected APIs.
+
+Enforcement is independent from failure behavior. In report-only mode, a
+successful denied decision is observable and attached to the request context,
+but the request continues. Limiter and resolver errors still follow the
+configured fail-open or fail-closed mode.
 
 ## Redis topology
 
@@ -91,5 +103,8 @@ and persistence remain deployment responsibilities.
 
 - Implement `ratelimit.Limiter` for another algorithm or backend.
 - Supply custom identity functions to framework adapters.
+- Select policies dynamically from route, tenant, or plan data.
+- Read the selected policy and decision from downstream request context.
+- Trial new policies with report-only enforcement.
 - Use observer callbacks for metrics and traces.
 - Customize denied and limiter-error HTTP responses.
