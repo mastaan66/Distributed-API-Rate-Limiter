@@ -3,7 +3,7 @@
 All notable changes are documented here. The project follows Semantic
 Versioning and the Keep a Changelog structure.
 
-## [Unreleased]
+## [0.1.0] - 2026-08-28
 
 ### Added
 
@@ -29,3 +29,5 @@ Versioning and the Keep a Changelog structure.
 ### Removed
 
 - Removed the checked-in platform-specific server executable
+
+## [Unreleased]
