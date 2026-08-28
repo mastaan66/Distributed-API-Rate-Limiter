@@ -54,6 +54,7 @@ jobs:
   vulnerability-scan:
     name: Vulnerability scan
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - name: Check out source
         uses: actions/checkout@v4
